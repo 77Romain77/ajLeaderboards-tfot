@@ -119,6 +119,40 @@ public class SqliteMethod implements CacheMethod {
                 e.printStackTrace();
             }
         }
+        migrateReachedAtColumns();
+    }
+
+    private void migrateReachedAtColumns() {
+        try(Statement statement = conn.createStatement();
+            ResultSet resultSet = statement.executeQuery("PRAGMA user_version;")) {
+            int version = resultSet.getInt(1);
+            if(version >= 6) return;
+        } catch(SQLException e) {
+            e.printStackTrace();
+            return;
+        }
+
+        long migrationTime = System.currentTimeMillis();
+        plugin.getLogger().info("Adding score achievement timestamps to SQLite leaderboard tables");
+        try(Statement statement = conn.createStatement()) {
+            for(String table : cacheInstance.getDbTableList()) {
+                for(TimedType type : TimedType.values()) {
+                    try {
+                        statement.executeUpdate(
+                                "alter table \""+table+"\" add column \""+Cache.reachedAtColumn(type)+
+                                        "\" BIGINT NOT NULL DEFAULT "+migrationTime
+                        );
+                    } catch(SQLException e) {
+                        String message = e.getMessage();
+                        if(message == null || !message.contains("duplicate column name")) throw e;
+                    }
+                }
+            }
+            statement.executeUpdate("PRAGMA user_version = 6;");
+        } catch(SQLException e) {
+            plugin.getLogger().severe("Unable to migrate SQLite score achievement timestamps");
+            e.printStackTrace();
+        }
     }
 
     @Override

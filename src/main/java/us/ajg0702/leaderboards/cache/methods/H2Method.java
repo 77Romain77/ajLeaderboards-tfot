@@ -140,6 +140,23 @@ public class H2Method implements CacheMethod {
                     statement.executeUpdate("COMMENT ON TABLE \""+tableName+"\" IS '3';");
                     version = 3;
                 }
+                if(version == 3) {
+                    long migrationTime = System.currentTimeMillis();
+                    plugin.getLogger().info("Adding score achievement timestamps to H2 table "+tableName);
+                    for(TimedType type : TimedType.values()) {
+                        try {
+                            statement.executeUpdate(
+                                    "alter table \""+tableName+"\" add column \""+Cache.reachedAtColumn(type)+
+                                            "\" BIGINT DEFAULT "+migrationTime+" NOT NULL"
+                            );
+                        } catch(SQLException e) {
+                            String message = e.getMessage();
+                            if(message == null || !message.contains("42121")) throw e;
+                        }
+                    }
+                    statement.executeUpdate("COMMENT ON TABLE \""+tableName+"\" IS '4';");
+                    version = 4;
+                }
             }
         } catch (SQLException e) {
             e.printStackTrace();

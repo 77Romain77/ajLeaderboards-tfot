@@ -2,6 +2,7 @@ package us.ajg0702.leaderboards.cache.helpers;
 
 import com.google.gson.JsonObject;
 import us.ajg0702.leaderboards.boards.TimedType;
+import us.ajg0702.leaderboards.cache.Cache;
 import us.ajg0702.leaderboards.utils.EasyJsonObject;
 
 import java.sql.ResultSet;
@@ -17,6 +18,7 @@ public class DbRow {
     private final Map<TimedType, Double> deltas;
     private final Map<TimedType, Double> lastTotals;
     private final Map<TimedType, Long> timestamps;
+    private final Map<TimedType, Long> reachedAts;
 
     private final String namecache;
     private final String prefixcache;
@@ -31,6 +33,7 @@ public class DbRow {
                 UUID.fromString(resultSet.getString(getIndex(resultSet, "id"))),
                 resultSet.getDouble(getIndex(resultSet, "value")),
                 getTypeMaps(resultSet),
+                getReachedAts(resultSet),
                 resultSet.getString(getIndex(resultSet, "namecache")),
                 resultSet.getString(getIndex(resultSet, "prefixcache")),
                 resultSet.getString(getIndex(resultSet, "suffixcache")),
@@ -42,7 +45,7 @@ public class DbRow {
         positionCache.clear();
     }
 
-    private DbRow(UUID id, double value, List<Object> typeMaps, String namecache, String prefixcache, String suffixcache, String displaynamecache) {
+    private DbRow(UUID id, double value, List<Object> typeMaps, Map<TimedType, Long> reachedAts, String namecache, String prefixcache, String suffixcache, String displaynamecache) {
         //noinspection unchecked
         this(
                 id,
@@ -50,6 +53,7 @@ public class DbRow {
                 (Map<TimedType, Double>) typeMaps.get(0),
                 (Map<TimedType, Double>) typeMaps.get(1),
                 (Map<TimedType, Long>) typeMaps.get(2),
+                reachedAts,
                 namecache,
                 prefixcache,
                 suffixcache,
@@ -57,12 +61,13 @@ public class DbRow {
         );
     }
 
-    public DbRow(UUID id, double value, Map<TimedType, Double> deltas, Map<TimedType, Double> lastTotals, Map<TimedType, Long> timestamps, String namecache, String prefixcache, String suffixcache, String displaynamecache) {
+    public DbRow(UUID id, double value, Map<TimedType, Double> deltas, Map<TimedType, Double> lastTotals, Map<TimedType, Long> timestamps, Map<TimedType, Long> reachedAts, String namecache, String prefixcache, String suffixcache, String displaynamecache) {
         this.id = id;
         this.value = value;
         this.deltas = deltas;
         this.lastTotals = lastTotals;
         this.timestamps = timestamps;
+        this.reachedAts = reachedAts;
         this.namecache = namecache;
         this.prefixcache = prefixcache;
         this.suffixcache = suffixcache;
@@ -82,6 +87,14 @@ public class DbRow {
             timestamps.put(type, resultSet.getLong(getIndex(resultSet, type.lowerName()+"_timestamp")));
         }
         return Arrays.asList(deltas, lastTotals, timestamps);
+    }
+
+    private static Map<TimedType, Long> getReachedAts(ResultSet resultSet) throws SQLException {
+        Map<TimedType, Long> reachedAts = new EnumMap<>(TimedType.class);
+        for(TimedType type : TimedType.values()) {
+            reachedAts.put(type, resultSet.getLong(getIndex(resultSet, Cache.reachedAtColumn(type))));
+        }
+        return reachedAts;
     }
 
     private static int getIndex(ResultSet rs, String name) throws SQLException {
@@ -113,6 +126,9 @@ public class DbRow {
     public Map<TimedType, Long> getTimestamps() {
         return timestamps;
     }
+    public Map<TimedType, Long> getReachedAts() {
+        return reachedAts;
+    }
     public String getNamecache() {
         return namecache;
     }
@@ -132,6 +148,8 @@ public class DbRow {
                 .add("id", getId().toString())
                 .add("value", getValue());
         for(TimedType type : TimedType.values()) {
+            out.add(Cache.reachedAtColumn(type), getReachedAts().get(type));
+            if(type == TimedType.ALLTIME) continue;
             String lowerName = type.lowerName();
             out.add(lowerName+"_delta", getDeltas().get(type));
             out.add(lowerName+"_lasttotal", getLastTotals().get(type));
@@ -148,8 +166,12 @@ public class DbRow {
         final Map<TimedType, Double> deltas = new HashMap<>();
         final Map<TimedType, Double> lastTotals = new HashMap<>();
         final Map<TimedType, Long> timestamps = new HashMap<>();
+        final Map<TimedType, Long> reachedAts = new EnumMap<>(TimedType.class);
+        long importTime = System.currentTimeMillis();
 
         for(TimedType type : TimedType.values()) {
+            String reachedAtColumn = Cache.reachedAtColumn(type);
+            reachedAts.put(type, object.has(reachedAtColumn) ? object.get(reachedAtColumn).getAsLong() : importTime);
             if(type == TimedType.ALLTIME) continue;
 
             deltas.put(type, object.get(type.lowerName()+"_delta").getAsDouble());
@@ -160,7 +182,7 @@ public class DbRow {
         return new DbRow(
                 UUID.fromString(object.get("id").getAsString()),
                 object.get("value").getAsDouble(),
-                deltas, lastTotals, timestamps,
+                deltas, lastTotals, timestamps, reachedAts,
                 object.get("namecache").getAsString(),
                 object.get("prefixcache").getAsString(),
                 object.get("suffixcache").getAsString(),
