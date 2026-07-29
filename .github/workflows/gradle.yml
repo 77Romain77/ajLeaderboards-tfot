@@ -1,3 +1,4 @@
+# Automatic build for the TFOT fork
 name: Build plugin
 
 on:
