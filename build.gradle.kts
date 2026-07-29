@@ -6,7 +6,7 @@ plugins {
 }
 
 group = "us.ajg0702"
-version = "2.11.0-tfot.2"
+version = "2.11.0-tfot.3"
 
 repositories {
     mavenCentral()
