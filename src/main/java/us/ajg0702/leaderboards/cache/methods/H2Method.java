@@ -2,7 +2,6 @@ package us.ajg0702.leaderboards.cache.methods;
 
 import org.h2.jdbc.JdbcConnection;
 import org.h2.message.DbException;
-import us.ajg0702.leaderboards.Debug;
 import us.ajg0702.leaderboards.LeaderboardPlugin;
 import us.ajg0702.leaderboards.boards.TimedType;
 import us.ajg0702.leaderboards.cache.Cache;
@@ -14,6 +13,7 @@ import java.io.File;
 import java.io.IOException;
 import java.lang.reflect.Field;
 import java.sql.Connection;
+import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
@@ -83,84 +83,95 @@ public class H2Method implements CacheMethod {
         initialized = true;
         List<String> tables = cacheInstance.getDbTableList();
 
-        try(Statement statement = conn.createStatement()) {
-            //ResultSet rs = conn.getMetaData().getTables(null, null, "", null);
-            for(String tableName : tables) {
-                int version;
-                if(!tableName.startsWith(cacheInstance.getTablePrefix())) continue;
-                try {
-                    ResultSet rs = conn.createStatement().executeQuery("SELECT TABLE_NAME,COLUMN_NAME,REMARKS\n" +
-                            " FROM INFORMATION_SCHEMA.COLUMNS where TABLE_NAME='"+tableName+"'");
-                    rs.next();
-                    version = Integer.parseInt(rs.getString("REMARKS"));
-                    rs.close();
-                } catch(NumberFormatException e) {
-                    version = 0;
-                } catch(SQLException e) {
-                    String message = e.getMessage();
-                    if(message != null && message.contains("Column 'COMMENT' not found")) {
-                        version = 0;
-                    } else {
-                        throw e;
-                    }
-                }
-                Debug.info("Table version for "+tableName+" is: "+version);
+        for(String tableName : tables) {
+            if(!tableName.startsWith(cacheInstance.getTablePrefix())) continue;
+            try {
+                migrateTable(tableName);
+            } catch(SQLException e) {
+                plugin.getLogger().log(
+                        Level.WARNING,
+                        "Unable to migrate H2 table \""+tableName+"\". Continuing with the remaining tables.",
+                        e
+                );
+            }
+        }
+    }
 
-                if(version == 0 || version == 1) {
-                    TimedType type = TimedType.YEARLY;
-                    try {
-                        statement.executeUpdate("alter table \""+tableName+"\" add column "+type.lowerName()+"_delta BIGINT");
-                        statement.executeUpdate("alter table \""+tableName+"\" add column "+type.lowerName()+"_lasttotal BIGINT");
-                        statement.executeUpdate("alter table \""+tableName+"\" add column "+type.lowerName()+"_timestamp BIGINT");
-                    } catch(SQLException e) {
-                        String message = e.getMessage();
-                        if(message != null && message.contains("42121")) {
-//                            plugin.getLogger().info("The columns already exist for "+tableName+". Canceling updater and bumping DB version.");
-                            try {
-                                //conn.createStatement().executeUpdate("UPDATE INFORMATION_SCHEMA.COLUMNS where TABLE_NAME=\""+tableName+"\" SET REMARKS = '1';");
-                                conn.createStatement().executeUpdate("COMMENT ON TABLE \""+tableName+"\" IS '2';");
-                            } catch (SQLException er) {
-                                er.printStackTrace();
-                                throw e;
-                            }
-                        } else {
-                            throw e;
-                        }
+    private void migrateTable(String tableName) throws SQLException {
+        String table = quoteIdentifier(tableName);
+
+        try(Statement statement = conn.createStatement()) {
+            // Inspect the actual schema instead of trusting the table comment. Older
+            // versions could leave the comment ahead of the real schema after a
+            // partially failed migration.
+            String yearly = TimedType.YEARLY.lowerName();
+            ensureColumn(statement, tableName, yearly+"_delta", "BIGINT");
+            ensureColumn(statement, tableName, yearly+"_lasttotal", "BIGINT");
+            ensureColumn(statement, tableName, yearly+"_timestamp", "BIGINT");
+
+            long migrationTime = System.currentTimeMillis();
+            boolean addedTimestamp = false;
+            for(TimedType type : TimedType.values()) {
+                String column = Cache.reachedAtColumn(type);
+                if(!columnExists(tableName, column)) {
+                    if(!addedTimestamp) {
+                        plugin.getLogger().info("Adding score achievement timestamps to H2 table "+tableName);
+                        addedTimestamp = true;
                     }
-                    statement.executeUpdate("COMMENT ON TABLE \""+tableName+"\" IS '2';");
-                    version = 2;
-                }
-                if(version == 2) {
-                    for (TimedType type : TimedType.values()) {
-                        String index = type == TimedType.ALLTIME ? "value" : type.lowerName()+"_delta";
-                        conn.createStatement().executeUpdate(
-                                "create index if not exists `" + index + "` on `"+tableName+"` (`" + index + "`)"
-                        );
-                    }
-                    statement.executeUpdate("COMMENT ON TABLE \""+tableName+"\" IS '3';");
-                    version = 3;
-                }
-                if(version == 3) {
-                    long migrationTime = System.currentTimeMillis();
-                    plugin.getLogger().info("Adding score achievement timestamps to H2 table "+tableName);
-                    for(TimedType type : TimedType.values()) {
-                        try {
-                            statement.executeUpdate(
-                                    "alter table \""+tableName+"\" add column \""+Cache.reachedAtColumn(type)+
-                                            "\" BIGINT DEFAULT "+migrationTime+" NOT NULL"
-                            );
-                        } catch(SQLException e) {
-                            String message = e.getMessage();
-                            if(message == null || !message.contains("42121")) throw e;
-                        }
-                    }
-                    statement.executeUpdate("COMMENT ON TABLE \""+tableName+"\" IS '4';");
-                    version = 4;
+                    ensureColumn(
+                            statement,
+                            tableName,
+                            column,
+                            "BIGINT DEFAULT "+migrationTime+" NOT NULL"
+                    );
                 }
             }
-        } catch (SQLException e) {
-            e.printStackTrace();
+
+            // Index creation is an optimization and must never prevent schema repair.
+            for(TimedType type : TimedType.values()) {
+                String index = type == TimedType.ALLTIME ? "value" : type.lowerName()+"_delta";
+                try {
+                    statement.executeUpdate(
+                            "CREATE INDEX IF NOT EXISTS "+quoteIdentifier(index)+
+                                    " ON "+table+" ("+quoteIdentifier(index)+")"
+                    );
+                } catch(SQLException e) {
+                    plugin.getLogger().log(
+                            Level.WARNING,
+                            "Unable to create H2 index \""+index+"\" on table \""+tableName+
+                                    "\". The table migration will continue.",
+                            e
+                    );
+                }
+            }
+            statement.executeUpdate("COMMENT ON TABLE "+table+" IS '4'");
         }
+    }
+
+    private void ensureColumn(Statement statement, String tableName, String columnName, String definition)
+            throws SQLException {
+        if(columnExists(tableName, columnName)) return;
+        statement.executeUpdate(
+                "ALTER TABLE "+quoteIdentifier(tableName)+" ADD COLUMN "+
+                        quoteIdentifier(columnName)+" "+definition
+        );
+    }
+
+    private boolean columnExists(String tableName, String columnName) throws SQLException {
+        try(PreparedStatement statement = conn.prepareStatement(
+                "SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS "+
+                        "WHERE TABLE_NAME = ? AND COLUMN_NAME = ?"
+        )) {
+            statement.setString(1, tableName);
+            statement.setString(2, columnName);
+            try(ResultSet result = statement.executeQuery()) {
+                return result.next() && result.getInt(1) > 0;
+            }
+        }
+    }
+
+    private String quoteIdentifier(String identifier) {
+        return "\""+identifier.replace("\"", "\"\"")+"\"";
     }
 
     @Override
