@@ -96,6 +96,7 @@ public class SqliteMethod implements CacheMethod {
                 }
 
                 statement.executeUpdate("PRAGMA user_version = 3;");
+                version = 3;
             }
             if(version == 3 || version == 4) {
                 TimedType type = TimedType.YEARLY;
