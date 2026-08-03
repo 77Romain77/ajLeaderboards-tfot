@@ -531,6 +531,8 @@ public class TopManager {
     }
 
 
+    private static final String MISSING_EXTRA_VALUE = "\u0000ajlb_missing_extra\u0000";
+
     Map<ExtraKey, Long> extraLastRefresh = new ConcurrentHashMap<>();
     LoadingCache<ExtraKey, String> extraCache = CacheBuilder.newBuilder()
             .expireAfterAccess(30, TimeUnit.MINUTES)
@@ -538,7 +540,9 @@ public class TopManager {
             .build(new CacheLoader<ExtraKey, String>() {
                 @Override
                 public String load(ExtraKey key) {
-                    return plugin.getExtraManager().getExtra(key.getId(), key.getPlaceholder());
+                    return cacheableExtraValue(
+                            plugin.getExtraManager().getExtra(key.getId(), key.getPlaceholder())
+                    );
                 }
             });
     public String getExtra(UUID id, String placeholder) {
@@ -558,13 +562,13 @@ public class TopManager {
                 extraLastRefresh.put(key, System.currentTimeMillis());
                 fetchExtraAsync(id, placeholder);
             }
-            return cached;
+            return exposedExtraValue(cached);
         }
     }
     public String fetchExtra(UUID id, String placeholder) {
         ExtraKey key = new ExtraKey(id, placeholder);
         String value = plugin.getExtraManager().getExtra(id, placeholder);
-        extraCache.put(key, value);
+        extraCache.put(key, cacheableExtraValue(value));
         return value;
     }
     public void fetchExtraAsync(UUID id, String placeholder) {
@@ -578,7 +582,15 @@ public class TopManager {
             fetchExtraAsync(id, placeholder);
             return null;
         }
-        return r;
+        return exposedExtraValue(r);
+    }
+
+    private String cacheableExtraValue(String value) {
+        return value == null ? MISSING_EXTRA_VALUE : value;
+    }
+
+    private String exposedExtraValue(String value) {
+        return MISSING_EXTRA_VALUE.equals(value) ? null : value;
     }
 
     public StatEntry getRelative(OfflinePlayer player, int difference, String board, TimedType type) {
@@ -710,4 +722,3 @@ public class TopManager {
                 "feel free to ask in aj's discord server (invite link is on the ajLeaderboards plugin page under 'support')");
     }
 }
-

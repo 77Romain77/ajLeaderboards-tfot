@@ -193,6 +193,23 @@ public class MysqlMethod implements CacheMethod {
                     statement.executeUpdate("ALTER TABLE `"+tableName+"` COMMENT = '5';");
                     version = 5;
                 }
+                if(version == 5) {
+                    long migrationTime = System.currentTimeMillis();
+                    plugin.getLogger().info("Adding score achievement timestamps to MySQL table "+tableName);
+                    for(TimedType type : TimedType.values()) {
+                        try {
+                            statement.executeUpdate(
+                                    "alter table `"+tableName+"` add column `"+Cache.reachedAtColumn(type)+
+                                            "` BIGINT NOT NULL DEFAULT "+migrationTime
+                            );
+                        } catch(SQLException e) {
+                            String message = e.getMessage();
+                            if(message == null || !message.contains("Duplicate column name")) throw e;
+                        }
+                    }
+                    statement.executeUpdate("ALTER TABLE `"+tableName+"` COMMENT = '6';");
+                    version = 6;
+                }
             }
         } catch (SQLException e) {
             e.printStackTrace();
