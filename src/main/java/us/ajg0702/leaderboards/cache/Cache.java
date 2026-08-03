@@ -15,6 +15,7 @@ import us.ajg0702.leaderboards.boards.TimedType;
 import us.ajg0702.leaderboards.boards.keys.BoardType;
 import us.ajg0702.leaderboards.boards.keys.PositionBoardType;
 import us.ajg0702.leaderboards.cache.helpers.DbRow;
+import us.ajg0702.leaderboards.cache.helpers.ScoreChangeValidator;
 import us.ajg0702.leaderboards.cache.methods.H2Method;
 import us.ajg0702.leaderboards.cache.methods.MysqlMethod;
 import us.ajg0702.leaderboards.cache.methods.SqliteMethod;
@@ -83,6 +84,8 @@ public class Cache {
 
 	List<String> nonExistantBoards = new CopyOnWriteArrayList<>();
 	private final AtomicLong lastReachedAt = new AtomicLong();
+	private final ScoreChangeValidator scoreChangeValidator = new ScoreChangeValidator(5_000L);
+	private final Map<BoardPlayer, Object> updateLocks = new ConcurrentHashMap<>();
 
 	public Cache(LeaderboardPlugin plugin) {
 		this.plugin = plugin;
@@ -528,9 +531,11 @@ public class Cache {
 			if(Double.isNaN(output)) throw new NumberFormatException("Placeholder returned NaN");
 			if(Double.isInfinite(output)) throw new NumberFormatException("Placeholder returned Infinite");
 		} catch(NumberFormatException e) {
+			scoreChangeValidator.clear(tablePrefix+board, player.getUniqueId());
 			if(debug) Debug.info("Placeholder %"+board+"% for "+player.getName()+" returned a non-number! Ignoring it. Message: " + e);
 			return;
 		} catch(Exception e) {
+			scoreChangeValidator.clear(tablePrefix+board, player.getUniqueId());
 			plugin.getLogger().log(Level.WARNING, "Placeholder %"+board+"% for player "+player.getName()+" threw an error:", e);
 			return;
 		}
@@ -570,12 +575,15 @@ public class Cache {
 		Runnable updateTask = () -> {
 
 			BoardPlayer boardPlayer = new BoardPlayer(board, player);
+			Object updateLock = updateLocks.computeIfAbsent(boardPlayer, ignored -> new Object());
+			synchronized(updateLock) {
 
 			if(waitedUpdate) {
 				UpdatePlayerEvent updatePlayerEvent = new UpdatePlayerEvent(boardPlayer);
 				Bukkit.getPluginManager().callEvent(updatePlayerEvent);
 				if(updatePlayerEvent.isCancelled()) {
 					Debug.info("Update for " + player.getName() + " on " + board + " was canceled by an event!");
+					scoreChangeValidator.clear(tablePrefix+board, player.getUniqueId());
 					return;
 				}
 			}
@@ -588,12 +596,14 @@ public class Cache {
 					cached.getSuffix().equals(finalSuffix)
 			) {
 				if(debug) Debug.info("Skipping updating of "+player.getName()+" for "+board+" because their cached score is the same as their current score");
+				scoreChangeValidator.clear(tablePrefix+board, player.getUniqueId());
 				return;
 			}
 
 			if(plugin.getAConfig().getStringList("dont-add-zero").contains(board)) {
 				if(output == 0) {
 					Debug.info("Skipping " + player.getName() + " because they returned 0 for " + board + "(dont-add-zero)");
+					scoreChangeValidator.clear(tablePrefix+board, player.getUniqueId());
 					return;
 				}
 			}
@@ -634,6 +644,10 @@ public class Cache {
 						timedTypeValues,
 						nextReachedAt()
 				);
+				if(reachedAts == null) {
+					if(debug) Debug.info("Waiting to confirm score change for "+player.getName()+" on "+board);
+					return;
+				}
 
 				try(PreparedStatement statement = conn.prepareStatement(String.format(
 						method.formatStatement(method.getName().equals("h2") ? INSERT_OR_UPDATE_PLAYER_H2 : INSERT_OR_UPDATE_PLAYER),
@@ -706,6 +720,7 @@ public class Cache {
 			} catch(SQLException e) {
 				if(plugin.isShuttingDown()) return;
 				plugin.getLogger().log(Level.WARNING, "Unable to update stat for player:", e);
+			}
 			}
 		};
 
@@ -1014,11 +1029,6 @@ public class Cache {
 			Map<TimedType, Double> newScores,
 			long now
 	) throws SQLException {
-		Map<TimedType, Long> reachedAts = new EnumMap<>(TimedType.class);
-		for(TimedType type : TimedType.values()) {
-			reachedAts.put(type, now);
-		}
-
 		StringBuilder columns = new StringBuilder();
 		for(TimedType type : TimedType.values()) {
 			String scoreColumn = type == TimedType.ALLTIME ? "value" : type.lowerName()+"_delta";
@@ -1031,17 +1041,43 @@ public class Cache {
 		))) {
 			statement.setString(1, playerId);
 			try(ResultSet resultSet = statement.executeQuery()) {
-				if(!resultSet.next()) return reachedAts;
+				if(!resultSet.next()) {
+					Map<TimedType, Long> reachedAts = new EnumMap<>(TimedType.class);
+					for(TimedType type : TimedType.values()) reachedAts.put(type, now);
+					return reachedAts;
+				}
+
+				Map<String, Double> storedScores = new HashMap<>();
+				Map<String, Double> observedScores = new HashMap<>();
+				Map<TimedType, Long> previousReachedAts = new EnumMap<>(TimedType.class);
 				for(TimedType type : TimedType.values()) {
 					String scoreColumn = type == TimedType.ALLTIME ? "value" : type.lowerName()+"_delta";
-					long previousReachedAt = resultSet.getLong(reachedAtColumn(type));
-					if(Double.compare(resultSet.getDouble(scoreColumn), newScores.get(type)) == 0 && previousReachedAt > 0) {
+					storedScores.put(type.name(), resultSet.getDouble(scoreColumn));
+					observedScores.put(type.name(), newScores.get(type));
+					previousReachedAts.put(type, resultSet.getLong(reachedAtColumn(type)));
+				}
+
+				ScoreChangeValidator.ValidationResult validation = scoreChangeValidator.validate(
+						table,
+						UUID.fromString(playerId),
+						storedScores,
+						observedScores,
+						now
+				);
+				if(!validation.isAccepted()) return null;
+
+				Map<TimedType, Long> reachedAts = new EnumMap<>(TimedType.class);
+				for(TimedType type : TimedType.values()) {
+					long previousReachedAt = previousReachedAts.get(type);
+					if(Double.compare(storedScores.get(type.name()), newScores.get(type)) == 0 && previousReachedAt > 0) {
 						reachedAts.put(type, previousReachedAt);
+					} else {
+						reachedAts.put(type, validation.getReachedAt());
 					}
 				}
+				return reachedAts;
 			}
 		}
-		return reachedAts;
 	}
 
 	private long nextReachedAt() {
@@ -1107,6 +1143,8 @@ public class Cache {
 	 */
 	public void cleanPlayer(Player player) {
 		zeroPlayers.removeIf(boardPlayer -> boardPlayer.getPlayer().equals(player));
+		scoreChangeValidator.clearPlayer(player.getUniqueId());
+		updateLocks.keySet().removeIf(boardPlayer -> boardPlayer.getPlayerId().equals(player.getUniqueId()));
 		plugin.getTopManager().positionPlayerCache.remove(player.getUniqueId());
 	}
 
